@@ -202,6 +202,7 @@ static const uint8_t x264_scan8[16*3 + 3] =
 };
 
 #include "x264.h"
+#include "cabac.h"
 #include "bitstream.h"
 #include "set.h"
 #include "predict.h"
@@ -209,7 +210,6 @@ static const uint8_t x264_scan8[16*3 + 3] =
 #include "mc.h"
 #include "frame.h"
 #include "dct.h"
-#include "cabac.h"
 #include "quant.h"
 #include "cpu.h"
 #include "threadpool.h"
