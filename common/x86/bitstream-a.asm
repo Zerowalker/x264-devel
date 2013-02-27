@@ -79,7 +79,7 @@ cglobal nal_escape, 3,5
     jmp .first_escape
 
     NAL_LOOP .loop_aligned, mova
-%if mmsize==16
+%if mmsize>=16
     jmp .ret
     NAL_LOOP .loop_unaligned, movu
 %endif
@@ -107,7 +107,7 @@ ALIGN 16
     jnz .escape_loop
     mova      m0, [r4]
     mova      m1, [r4+mmsize]
-%if mmsize==16
+%if mmsize>=16
     lea      r4d, [r0+r1]
     test     r4d, mmsize-1
     jnz .loop_unaligned
@@ -128,4 +128,6 @@ NAL_ESCAPE
 INIT_XMM sse2
 NAL_ESCAPE
 INIT_XMM avx
+NAL_ESCAPE
+INIT_YMM avx2
 NAL_ESCAPE

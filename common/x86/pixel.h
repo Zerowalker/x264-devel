@@ -56,6 +56,7 @@ DECL_X4( sad, mmx2 )
 DECL_X4( sad, sse2 )
 DECL_X4( sad, sse3 )
 DECL_X4( sad, ssse3 )
+DECL_X4( sad, avx2 )
 DECL_X1( ssd, mmx )
 DECL_X1( ssd, mmx2 )
 DECL_X1( ssd, sse2slow )
@@ -63,6 +64,7 @@ DECL_X1( ssd, sse2 )
 DECL_X1( ssd, ssse3 )
 DECL_X1( ssd, avx )
 DECL_X1( ssd, xop )
+DECL_X1( ssd, avx2 )
 DECL_X1( satd, mmx2 )
 DECL_X1( satd, sse2 )
 DECL_X1( satd, ssse3 )
@@ -70,6 +72,7 @@ DECL_X1( satd, ssse3_atom )
 DECL_X1( satd, sse4 )
 DECL_X1( satd, avx )
 DECL_X1( satd, xop )
+DECL_X1( satd, avx2 )
 DECL_X1( sa8d, mmx2 )
 DECL_X1( sa8d, sse2 )
 DECL_X1( sa8d, ssse3 )
@@ -90,6 +93,7 @@ DECL_PIXELS( uint64_t, var, mmx2, ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, var, sse2, ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, var, avx,  ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, var, xop,  ( pixel *pix, intptr_t i_stride ))
+DECL_PIXELS( uint64_t, var, avx2, ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, hadamard_ac, mmx2,  ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, hadamard_ac, sse2,  ( pixel *pix, intptr_t i_stride ))
 DECL_PIXELS( uint64_t, hadamard_ac, ssse3, ( pixel *pix, intptr_t i_stride ))
@@ -114,6 +118,7 @@ void x264_intra_satd_x3_16x16_ssse3( uint8_t *, uint8_t *, int * );
 void x264_intra_sad_x3_16x16_mmx2  ( pixel   *, pixel   *, int * );
 void x264_intra_sad_x3_16x16_sse2  ( pixel   *, pixel   *, int * );
 void x264_intra_sad_x3_16x16_ssse3 ( pixel   *, pixel   *, int * );
+void x264_intra_sad_x3_16x16_avx2  ( pixel   *, pixel   *, int * );
 void x264_intra_sa8d_x3_8x8_mmx2   ( uint8_t *, uint8_t *, int * );
 void x264_intra_sa8d_x3_8x8_sse2   ( pixel   *, pixel   *, int * );
 void x264_intra_sad_x3_8x8_mmx2    ( pixel   *, pixel   *, int * );
@@ -132,6 +137,7 @@ int x264_intra_sa8d_x9_8x8_avx  ( uint8_t *, uint8_t *, uint8_t *, uint16_t *, u
 int x264_intra_sad_x9_8x8_ssse3 ( uint8_t *, uint8_t *, uint8_t *, uint16_t *, uint16_t * );
 int x264_intra_sad_x9_8x8_sse4  ( uint8_t *, uint8_t *, uint8_t *, uint16_t *, uint16_t * );
 int x264_intra_sad_x9_8x8_avx   ( uint8_t *, uint8_t *, uint8_t *, uint16_t *, uint16_t * );
+int x264_intra_sad_x9_8x8_avx2  ( uint8_t *, uint8_t *, uint8_t *, uint16_t *, uint16_t * );
 
 void x264_pixel_ssd_nv12_core_mmx2( pixel *pixuv1, intptr_t stride1,
                                     pixel *pixuv2, intptr_t stride2, int width,
@@ -187,6 +193,9 @@ DECL_ADS( 1, ssse3 )
 DECL_ADS( 4, avx )
 DECL_ADS( 2, avx )
 DECL_ADS( 1, avx )
+DECL_ADS( 4, avx2 )
+DECL_ADS( 2, avx2 )
+DECL_ADS( 1, avx2 )
 
 #undef DECL_PIXELS
 #undef DECL_X1

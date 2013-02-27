@@ -390,4 +390,5 @@ INIT_XMM sse2
 ADD8x8
 INIT_XMM avx
 ADD8x8
+
 %endif ; !HIGH_BIT_DEPTH

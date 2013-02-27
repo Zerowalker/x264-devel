@@ -32,6 +32,8 @@
 %include "x86util.asm"
 
 SECTION_RODATA 32
+hmul_16p:  times 16 db 1
+           times 8 db 1, -1
 mask_ff:   times 16 db 0xff
            times 16 db 0
 %if BIT_DEPTH == 10
@@ -85,6 +87,7 @@ intrax9b_v1:    db  0, 1,-1,-1,-1,-1,-1,-1, 4, 5,-1,-1,-1,-1,-1,-1
 intrax9b_v2:    db  2, 3,-1,-1,-1,-1,-1,-1, 6, 7,-1,-1,-1,-1,-1,-1
 intrax9b_lut:   db 0x60,0x64,0x80,0x00,0x04,0x20,0x40,0x24,0x44,0,0,0,0,0,0,0
 
+ALIGN 32
 intra8x9_h1:   db  7, 7, 7, 7, 7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 5, 5
 intra8x9_h2:   db  6, 6, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 4, 4
 intra8x9_h3:   db  3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1
@@ -286,6 +289,23 @@ SSD_ONE    16, 16
     punpcklbw m%2, m%4
 %endmacro
 
+%macro LOAD_AVX2 5
+    mova     xm%1, %3
+    vinserti128 m%1, m%1, %4, 1
+%if %5
+    lea       t0, [t0+2*t1]
+%endif
+%endmacro
+
+%macro JOIN_AVX2 7
+    mova     xm%2, %5
+    vinserti128 m%2, m%2, %6, 1
+%if %7
+    lea       t2, [t2+2*t3]
+%endif
+    SBUTTERFLY bw, %1, %2, %3
+%endmacro
+
 %macro SSD_LOAD_HALF 5
     LOAD      1, 2, [t0+%1], [t0+%3], 1
     JOIN      1, 2, 3, 4, [t2+%2], [t2+%4], 1
@@ -408,8 +428,15 @@ ALIGN 16
 %endif
     dec     al
     jg .loop
+%if mmsize==32
+    vextracti128 xm1, m0, 1
+    paddd  xm0, xm1
+    HADDD  xm0, xm1
+    movd   eax, xm0
+%else
     HADDD   m0, m1
     movd   eax, m0
+%endif
     RET
 %endif
 %endmacro
@@ -461,6 +488,11 @@ SSD  8,  8
 SSD 16,  8
 SSD  8, 16
 SSD  8,  4
+%define LOAD LOAD_AVX2
+%define JOIN JOIN_AVX2
+INIT_YMM avx2
+SSD 16, 16
+SSD 16,  8
 %assign function_align 16
 %endif ; !HIGH_BIT_DEPTH
 
@@ -625,7 +657,7 @@ SSD_NV12
 %if HIGH_BIT_DEPTH == 0
 %if %1
     mova  m7, [pw_00ff]
-%else
+%elif mmsize < 32
     pxor  m7, m7    ; zero
 %endif
 %endif ; !HIGH_BIT_DEPTH
@@ -641,12 +673,13 @@ SSD_NV12
 %else ; !HIGH_BIT_DEPTH
     HADDW   m5, m2
 %endif ; HIGH_BIT_DEPTH
-    movd   eax, m5
     HADDD   m6, m1
-    movd   edx, m6
 %if ARCH_X86_64
-    shl    rdx, 32
-    add    rax, rdx
+    punpckldq m5, m6
+    movq   rax, m5
+%else
+    movd   eax, m5
+    movd   edx, m6
 %endif
     RET
 %endmacro
@@ -804,6 +837,35 @@ INIT_XMM avx
 VAR
 INIT_XMM xop
 VAR
+
+INIT_YMM avx2
+cglobal pixel_var_16x16, 2,4,7
+    VAR_START 0
+    mov      r2d, 4
+    lea       r3, [r1*3]
+.loop:
+    pmovzxbw  m0, [r0]
+    pmovzxbw  m3, [r0+r1]
+    pmovzxbw  m1, [r0+r1*2]
+    pmovzxbw  m4, [r0+r3]
+    lea       r0, [r0+r1*4]
+    VAR_CORE
+    dec r2d
+    jg .loop
+    vextracti128 xm0, m5, 1
+    vextracti128 xm1, m6, 1
+    paddw  xm5, xm0
+    paddd  xm6, xm1
+    HADDW  xm5, xm2
+    HADDD  xm6, xm1
+%if ARCH_X86_64
+    punpckldq xm5, xm6
+    movq   rax, xm5
+%else
+    movd   eax, xm5
+    movd   edx, xm6
+%endif
+    RET
 %endif ; !HIGH_BIT_DEPTH
 
 %macro VAR2_END 1
@@ -1255,7 +1317,11 @@ cglobal pixel_satd_4x4, 4,6
 %if HIGH_BIT_DEPTH && %3
     pxor    %2, %2
 %elif cpuflag(ssse3) && notcpuflag(atom)
+%if mmsize==32
+    mova    %2, [hmul_16p]
+%else
     mova    %2, [hmul_8p]
+%endif
 %endif
     lea     r4, [3*r1]
     lea     r5, [3*r3]
@@ -1264,12 +1330,12 @@ cglobal pixel_satd_4x4, 4,6
 
 %macro SATD_END_SSE2 1-2
 %if HIGH_BIT_DEPTH
-    HADDUW  %1, m0
+    HADDUW  %1, xm0
 %if %0 == 2
     paddd   %1, %2
 %endif
 %else
-    HADDW   %1, m7
+    HADDW   %1, xm7
 %endif
     movd   eax, %1
     RET
@@ -4062,6 +4128,324 @@ INTRA_X9
 %endif
 HADAMARD_AC_SSE2
 
+%macro LOAD_SUMSUB_16x2P_AVX2 9 ; 2*dst, 2*tmp, mul, 4*ptr
+    vbroadcasti128 m%1, [%6]
+    vbroadcasti128 m%3, [%7]
+    vbroadcasti128 m%2, [%8]
+    vbroadcasti128 m%4, [%9]
+    DIFF_SUMSUB_SSSE3 %1, %3, %2, %4, %5
+%endmacro
+
+%macro LOAD_SUMSUB_16x4P_AVX2 7
+    LOAD_SUMSUB_16x2P_AVX2 %1, %2, %5, %6, %7, r0, r2, r0+r1, r2+r3
+    LOAD_SUMSUB_16x2P_AVX2 %3, %4, %5, %6, %7, r0+2*r1, r2+2*r3, r0+r4, r2+r5
+%endmacro
+
+%macro LOAD_SUMSUB_8x8P_AVX2 7 ; 4*dst, 2*tmp, mul]
+    movq   xm%1, [r0]
+    movq   xm%3, [r2]
+    movq   xm%2, [r0+r1]
+    movq   xm%4, [r2+r3]
+    vinserti128 m%1, m%1, [r0+4*r1], 1
+    vinserti128 m%3, m%3, [r2+4*r3], 1
+    vinserti128 m%2, m%2, [r0+r4], 1
+    vinserti128 m%4, m%4, [r2+r5], 1
+    punpcklqdq m%1, m%1
+    punpcklqdq m%3, m%3
+    punpcklqdq m%2, m%2
+    punpcklqdq m%4, m%4
+    DIFF_SUMSUB_SSSE3 %1, %3, %2, %4, %7
+    lea      r0, [r0+2*r1]
+    lea      r2, [r2+2*r3]
+    
+    movq   xm%3, [r0]
+    movq   xm%5, [r2]
+    movq   xm%4, [r0+r1]
+    movq   xm%6, [r2+r3]
+    vinserti128 m%3, m%3, [r0+4*r1], 1
+    vinserti128 m%5, m%5, [r2+4*r3], 1
+    vinserti128 m%4, m%4, [r0+r4], 1
+    vinserti128 m%6, m%6, [r2+r5], 1
+    punpcklqdq m%3, m%3
+    punpcklqdq m%5, m%5
+    punpcklqdq m%4, m%4
+    punpcklqdq m%6, m%6
+    DIFF_SUMSUB_SSSE3 %3, %5, %4, %6, %7
+%endmacro
+
+%macro SATD_START_AVX2 2-3 0
+    FIX_STRIDES r1, r3
+%if %3
+    vbroadcasti128 %2, [hmul_8p]
+    lea     r4, [5*r1]
+    lea     r5, [5*r3]
+%else
+    mova    %2, [hmul_16p]
+    lea     r4, [3*r1]
+    lea     r5, [3*r3]
+%endif
+    pxor    %1, %1
+%endmacro
+
+%define TRANS TRANS_SSE4
+INIT_YMM avx2
+cglobal pixel_satd_16x8_internal
+    LOAD_SUMSUB_16x4P_AVX2 0, 1, 2, 3, 4, 5, 7
+    lea  r0, [r0+4*r1]
+    lea  r2, [r2+4*r3]
+    SATD_8x4_SSE 0, 0, 1, 2, 3, 4, 5, 6
+    LOAD_SUMSUB_16x4P_AVX2 0, 1, 2, 3, 4, 5, 7
+    SATD_8x4_SSE 0, 0, 1, 2, 3, 4, 5, 6
+    ret
+
+cglobal pixel_satd_16x16, 4,6,8
+    SATD_START_AVX2 m6, m7
+    call pixel_satd_16x8_internal
+    lea  r0, [r0+4*r1]
+    lea  r2, [r2+4*r3]
+pixel_satd_16x8_internal:
+    call pixel_satd_16x8_internal
+    vextracti128 xm0, m6, 1
+    paddw        xm0, xm6
+    SATD_END_SSE2 xm0
+    RET
+
+cglobal pixel_satd_16x8, 4,6,8
+    SATD_START_AVX2 m6, m7
+    jmp pixel_satd_16x8_internal
+
+cglobal pixel_satd_8x8_internal
+    LOAD_SUMSUB_8x8P_AVX2 0, 1, 2, 3, 4, 5, 7
+    SATD_8x4_SSE 0, 0, 1, 2, 3, 4, 5, 6
+    ret
+
+cglobal pixel_satd_8x16, 4,6,8
+    SATD_START_AVX2 m6, m7, 1
+    call pixel_satd_8x8_internal
+    lea  r0, [r0+2*r1]
+    lea  r2, [r2+2*r3]
+    lea  r0, [r0+4*r1]
+    lea  r2, [r2+4*r3]
+    call pixel_satd_8x8_internal
+    vextracti128 xm0, m6, 1
+    paddw        xm0, xm6
+    SATD_END_SSE2 xm0
+    RET
+
+cglobal pixel_satd_8x8, 4,6,8
+    SATD_START_AVX2 m6, m7, 1
+    call pixel_satd_8x8_internal
+    vextracti128 xm0, m6, 1
+    paddw        xm0, xm6
+    SATD_END_SSE2 xm0
+    RET
+
+cglobal intra_sad_x9_8x8, 5,7,8
+    %define pred(i,j) [rsp+i*0x40+j*0x20]
+
+    mov         r6, rsp
+    and        rsp, ~31
+    SUB        rsp, 0x240
+    movq       xm5, [r0+FENC_STRIDE* 0]
+    movq       xm0, [r0+FENC_STRIDE* 1]
+    movq       xm6, [r0+FENC_STRIDE* 4]
+    movq       xm1, [r0+FENC_STRIDE* 5]
+    movhps     xm5, [r0+FENC_STRIDE* 2]
+    movhps     xm0, [r0+FENC_STRIDE* 3]
+    movhps     xm6, [r0+FENC_STRIDE* 6]
+    movhps     xm1, [r0+FENC_STRIDE* 7]
+    vinserti128 m5, m5, xm0, 1
+    vinserti128 m6, m6, xm1, 1
+
+    ; save instruction size: avoid 4-byte memory offsets
+    lea         r0, [intra8x9_h1+128]
+    %define off(m) (r0+m-(intra8x9_h1+128))
+
+; work around yasm bug: vpbroadcastq is broken on 32-bit
+%if ARCH_X86_64
+    vpbroadcastq m0, [r2+16]
+%else
+    movddup    xm0, [r2+16] 
+    vinserti128 m0, m0, xm0, 1
+%endif
+    psadbw      m4, m0, m5
+    psadbw      m2, m0, m6
+    mova pred(0,0), m0
+    mova pred(0,1), m0
+    paddw       m4, m2
+
+%if ARCH_X86_64
+    vpbroadcastq m0, [r2+7]
+%else
+    movddup    xm0, [r2+7]
+    vinserti128 m0, m0, xm0, 1
+%endif
+    pshufb      m3, m0, [off(intra8x9_h1)]
+    pshufb      m2, m0, [off(intra8x9_h3)]
+    mova pred(1,0), m3
+    mova pred(1,1), m2
+    psadbw      m3, m5
+    psadbw      m2, m6
+    paddw       m3, m2
+
+    lea         r5, [rsp+0x100]
+    %define pred(i,j) [r5+i*0x40+j*0x20-0x100]
+
+    ; combine the first two
+    pslldq      m3, 2
+    por         m4, m3
+
+    movhps     xm0, [r2+16]
+    pxor       xm2, xm2
+    psadbw     xm0, xm2
+    movhlps    xm1, xm0
+    paddw      xm0, xm1
+    psrlw      xm0, 3
+    pavgw      xm0, xm2
+    vpbroadcastb m0, xm0
+    mova pred(2,0), m0
+    mova pred(2,1), m0
+    psadbw      m3, m0, m5
+    psadbw      m2, m0, m6
+    paddw       m3, m2
+
+    pslldq      m3, 4
+    por         m4, m3
+
+    vbroadcasti128 m0, [r2+16]
+    vbroadcasti128 m2, [r2+17]
+    pslldq      m1, m0, 1
+    pavgb       m3, m0, m2
+    PRED4x4_LOWPASS m0, m1, m2, m0, m7
+    pshufb      m1, m0, [off(intra8x9_ddl1)]
+    pshufb      m2, m0, [off(intra8x9_ddl3)]
+    mova pred(3,0), m1
+    mova pred(3,1), m2
+    psadbw      m1, m5
+    psadbw      m2, m6
+    paddw       m1, m2
+
+    pslldq      m1, 6
+    por         m4, m1
+    vextracti128 xm1, m4, 1
+    paddw      xm4, xm1
+    movhlps    xm1, xm4
+    paddw      xm4, xm1
+    movq      [r4], xm4
+
+    ; for later
+    vinserti128 m7, m3, xm0, 1
+
+    vbroadcasti128 m2, [r2+8]
+    vbroadcasti128 m0, [r2+7]
+    vbroadcasti128 m1, [r2+6]
+    pavgb       m3, m2, m0
+    PRED4x4_LOWPASS m0, m1, m2, m0, m4
+    pshufb      m1, m0, [off(intra8x9_ddr1)]
+    pshufb      m2, m0, [off(intra8x9_ddr3)]
+    mova pred(4,0), m1
+    mova pred(4,1), m2
+    psadbw      m4, m1, m5
+    psadbw      m2, m6
+    paddw       m4, m2
+
+    add         r0, 256
+    add         r5, 0xC0
+    %define off(m) (r0+m-(intra8x9_h1+256+128))
+    %define pred(i,j) [r5+i*0x40+j*0x20-0x1C0]
+
+    vpblendd    m2, m3, m0, 11110011b
+    pshufb      m1, m2, [off(intra8x9_vr1)]
+    pshufb      m2, m2, [off(intra8x9_vr3)]
+    mova pred(5,0), m1
+    mova pred(5,1), m2
+    psadbw      m1, m5
+    psadbw      m2, m6
+    paddw       m1, m2
+
+    pslldq      m1, 2
+    por         m4, m1
+
+    pshufd      m2, m3, q0001
+    pblendw     m2, m0, q3330
+    punpcklbw   m0, m3
+    pshufb      m1, m2, [off(intra8x9_hd1)]
+    pshufb      m2, m0, [off(intra8x9_hd3)]
+    mova pred(6,0), m1
+    mova pred(6,1), m2
+    psadbw      m1, m5
+    psadbw      m2, m6
+    paddw       m1, m2
+
+    pslldq      m1, 4
+    por         m4, m1
+
+    pshufb      m1, m7, [off(intra8x9_vl1)]
+    pshufb      m2, m7, [off(intra8x9_vl3)]
+    mova pred(7,0), m1
+    mova pred(7,1), m2
+    psadbw      m1, m5
+    psadbw      m2, m6
+    paddw       m1, m2
+
+    pslldq      m1, 6
+    por         m4, m1
+    vextracti128 xm1, m4, 1
+    paddw      xm4, xm1
+    movhlps    xm1, xm4
+    paddw      xm4, xm1
+
+    pslldq      m1, m0, 1
+    vpbroadcastd m0, [r2+7]
+    palignr     m0, m1, 1
+    pshufb      m1, m0, [off(intra8x9_hu1)]
+    pshufb      m2, m0, [off(intra8x9_hu3)]
+    mova pred(8,0), m1
+    mova pred(8,1), m2
+    psadbw      m1, m5
+    psadbw      m2, m6
+    paddw       m1, m2
+    vextracti128 xm2, m1, 1
+    paddw      xm1, xm2
+    movhlps    xm2, xm1
+    paddw      xm1, xm2
+    movd       r2d, xm1
+
+    movu       xm0, [r3]
+    movq       xm1, [r4]
+    punpcklqdq xm1, xm4
+    paddw      xm0, xm1
+    mova      [r4], xm0
+    movzx      r5d, word [r3+16]
+    add        r2d, r5d
+    mov    [r4+16], r2w
+
+    phminposuw xm0, xm0
+    movd       r3d, xm0
+    add        r2d, 8<<16
+    cmp        r3w, r2w
+    cmovg      r3d, r2d
+
+    mov        r2d, r3d
+    shr         r3, 16
+    shl         r3, 6
+    add         r1, 4*FDEC_STRIDE
+    mova       xm0, [rsp+r3+0x00]
+    mova       xm1, [rsp+r3+0x10]
+    mova       xm2, [rsp+r3+0x20]
+    mova       xm3, [rsp+r3+0x30]
+    movq   [r1+FDEC_STRIDE*-4], xm0
+    movhps [r1+FDEC_STRIDE*-2], xm0
+    movq   [r1+FDEC_STRIDE*-3], xm1
+    movhps [r1+FDEC_STRIDE*-1], xm1
+    movq   [r1+FDEC_STRIDE* 0], xm2
+    movhps [r1+FDEC_STRIDE* 2], xm2
+    movq   [r1+FDEC_STRIDE* 1], xm3
+    movhps [r1+FDEC_STRIDE* 3], xm3
+    mov        rsp, r6
+    mov        eax, r2d
+    RET
+
 ;=============================================================================
 ; SSIM
 ;=============================================================================
@@ -4300,13 +4684,13 @@ ASD8
 
 %macro ADS_START 0
 %if UNIX64
-    movsxd  r5,  r5d
+    movsxd  r5, r5d
 %else
-    mov     r5d, r5m
+    mov    r5d, r5m
 %endif
-    mov     r0d, r5d
-    lea     r6,  [r4+r5+15]
-    and     r6,  ~15;
+    mov    r0d, r5d
+    lea     r6, [r4+r5+(mmsize-1)]
+    and     r6, ~(mmsize-1)
     shl     r2d,  1
 %endmacro
 
@@ -4314,9 +4698,14 @@ ASD8
     add     r1, 8*%1
     add     r3, 8*%1
     add     r6, 4*%1
-    sub     r0d, 4*%1
+    sub    r0d, 4*%1
     jg .loop
     WIN64_RESTORE_XMM rsp
+%if mmsize==32
+    vzeroupper
+%endif
+    lea     r6, [r4+r5+(mmsize-1)]
+    and     r6, ~(mmsize-1)
     jmp ads_mvs
 %endmacro
 
@@ -4326,192 +4715,226 @@ ASD8
 ;-----------------------------------------------------------------------------
 INIT_MMX mmx2
 cglobal pixel_ads4, 5,7
-    movq    mm6, [r0]
-    movq    mm4, [r0+8]
-    pshufw  mm7, mm6, 0
-    pshufw  mm6, mm6, q2222
-    pshufw  mm5, mm4, 0
-    pshufw  mm4, mm4, q2222
+    mova    m6, [r0]
+    mova    m4, [r0+8]
+    pshufw  m7, m6, 0
+    pshufw  m6, m6, q2222
+    pshufw  m5, m4, 0
+    pshufw  m4, m4, q2222
     ADS_START
 .loop:
-    movq    mm0, [r1]
-    movq    mm1, [r1+16]
-    psubw   mm0, mm7
-    psubw   mm1, mm6
-    ABSW    mm0, mm0, mm2
-    ABSW    mm1, mm1, mm3
-    movq    mm2, [r1+r2]
-    movq    mm3, [r1+r2+16]
-    psubw   mm2, mm5
-    psubw   mm3, mm4
-    paddw   mm0, mm1
-    ABSW    mm2, mm2, mm1
-    ABSW    mm3, mm3, mm1
-    paddw   mm0, mm2
-    paddw   mm0, mm3
-    pshufw  mm1, r6m, 0
-    paddusw mm0, [r3]
-    psubusw mm1, mm0
-    packsswb mm1, mm1
-    movd    [r6], mm1
+    movu      m0, [r1]
+    movu      m1, [r1+16]
+    psubw     m0, m7
+    psubw     m1, m6
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    movu      m2, [r1+r2]
+    movu      m3, [r1+r2+16]
+    psubw     m2, m5
+    psubw     m3, m4
+    paddw     m0, m1
+    ABSW      m2, m2, m1
+    ABSW      m3, m3, m1
+    paddw     m0, m2
+    paddw     m0, m3
+    pshufw    m1, r6m, 0
+    paddusw   m0, [r3]
+    psubusw   m1, m0
+    packsswb  m1, m1
+    movd    [r6], m1
     ADS_END 1
 
 cglobal pixel_ads2, 5,7
-    movq    mm6, [r0]
-    pshufw  mm5, r6m, 0
-    pshufw  mm7, mm6, 0
-    pshufw  mm6, mm6, q2222
+    mova      m6, [r0]
+    pshufw    m5, r6m, 0
+    pshufw    m7, m6, 0
+    pshufw    m6, m6, q2222
     ADS_START
 .loop:
-    movq    mm0, [r1]
-    movq    mm1, [r1+r2]
-    psubw   mm0, mm7
-    psubw   mm1, mm6
-    ABSW    mm0, mm0, mm2
-    ABSW    mm1, mm1, mm3
-    paddw   mm0, mm1
-    paddusw mm0, [r3]
-    movq    mm4, mm5
-    psubusw mm4, mm0
-    packsswb mm4, mm4
-    movd    [r6], mm4
+    movu      m0, [r1]
+    movu      m1, [r1+r2]
+    psubw     m0, m7
+    psubw     m1, m6
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    paddw     m0, m1
+    paddusw   m0, [r3]
+    mova      m4, m5
+    psubusw   m4, m0
+    packsswb  m4, m4
+    movd    [r6], m4
     ADS_END 1
 
 cglobal pixel_ads1, 5,7
-    pshufw  mm7, [r0], 0
-    pshufw  mm6, r6m, 0
+    pshufw    m7, [r0], 0
+    pshufw    m6, r6m, 0
     ADS_START
 .loop:
-    movq    mm0, [r1]
-    movq    mm1, [r1+8]
-    psubw   mm0, mm7
-    psubw   mm1, mm7
-    ABSW    mm0, mm0, mm2
-    ABSW    mm1, mm1, mm3
-    paddusw mm0, [r3]
-    paddusw mm1, [r3+8]
-    movq    mm4, mm6
-    movq    mm5, mm6
-    psubusw mm4, mm0
-    psubusw mm5, mm1
-    packsswb mm4, mm5
-    movq    [r6], mm4
+    movu      m0, [r1]
+    movu      m1, [r1+8]
+    psubw     m0, m7
+    psubw     m1, m7
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    paddusw   m0, [r3]
+    paddusw   m1, [r3+8]
+    mova      m4, m6
+    mova      m5, m6
+    psubusw   m4, m0
+    psubusw   m5, m1
+    packsswb  m4, m5
+    mova    [r6], m4
     ADS_END 2
 
 %macro ADS_XMM 0
+%if mmsize==32
+cglobal pixel_ads4, 5,7,8
+    vpbroadcastw m7, [r0+ 0]
+    vpbroadcastw m6, [r0+ 4]
+    vpbroadcastw m5, [r0+ 8]
+    vpbroadcastw m4, [r0+12]
+%else
 cglobal pixel_ads4, 5,7,12
-    movdqa  xmm4, [r0]
-    pshuflw xmm7, xmm4, 0
-    pshuflw xmm6, xmm4, q2222
-    pshufhw xmm5, xmm4, 0
-    pshufhw xmm4, xmm4, q2222
-    punpcklqdq xmm7, xmm7
-    punpcklqdq xmm6, xmm6
-    punpckhqdq xmm5, xmm5
-    punpckhqdq xmm4, xmm4
-%if ARCH_X86_64
-    movd    xmm8, r6m
-    SPLATW  xmm8, xmm8
+    mova      m4, [r0]
+    pshuflw   m7, m4, q0000
+    pshuflw   m6, m4, q2222
+    pshufhw   m5, m4, q0000
+    pshufhw   m4, m4, q2222
+    punpcklqdq m7, m7
+    punpcklqdq m6, m6
+    punpckhqdq m5, m5
+    punpckhqdq m4, m4
+%endif
+%if ARCH_X86_64 && mmsize == 16
+    movd      m8, r6m
+    SPLATW    m8, m8
     ADS_START
-    movdqu  xmm10, [r1]
-    movdqu  xmm11, [r1+r2]
+    movu     m10, [r1]
+    movu     m11, [r1+r2]
 .loop:
-    psubw   xmm0, xmm10, xmm7
-    movdqu xmm10, [r1+16]
-    psubw   xmm1, xmm10, xmm6
-    ABSW    xmm0, xmm0, xmm2
-    ABSW    xmm1, xmm1, xmm3
-    psubw   xmm2, xmm11, xmm5
-    movdqu xmm11, [r1+r2+16]
-    paddw   xmm0, xmm1
-    psubw   xmm3, xmm11, xmm4
-    movdqu  xmm9, [r3]
-    ABSW    xmm2, xmm2, xmm1
-    ABSW    xmm3, xmm3, xmm1
-    paddw   xmm0, xmm2
-    paddw   xmm0, xmm3
-    paddusw xmm0, xmm9
-    psubusw xmm1, xmm8, xmm0
-    packsswb xmm1, xmm1
-    movq    [r6], xmm1
+    psubw     m0, m10, m7
+    movu     m10, [r1+16]
+    psubw     m1, m10, m6
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    psubw     m2, m11, m5
+    movu     m11, [r1+r2+16]
+    paddw     m0, m1
+    psubw     m3, m11, m4
+    movu      m9, [r3]
+    ABSW      m2, m2, m1
+    ABSW      m3, m3, m1
+    paddw     m0, m2
+    paddw     m0, m3
+    paddusw   m0, m9
+    psubusw   m1, m8, m0
 %else
     ADS_START
 .loop:
-    movdqu  xmm0, [r1]
-    movdqu  xmm1, [r1+16]
-    psubw   xmm0, xmm7
-    psubw   xmm1, xmm6
-    ABSW    xmm0, xmm0, xmm2
-    ABSW    xmm1, xmm1, xmm3
-    movdqu  xmm2, [r1+r2]
-    movdqu  xmm3, [r1+r2+16]
-    psubw   xmm2, xmm5
-    psubw   xmm3, xmm4
-    paddw   xmm0, xmm1
-    ABSW    xmm2, xmm2, xmm1
-    ABSW    xmm3, xmm3, xmm1
-    paddw   xmm0, xmm2
-    paddw   xmm0, xmm3
-    movd    xmm1, r6m
-    movdqu  xmm2, [r3]
-    pshuflw xmm1, xmm1, 0
-    punpcklqdq xmm1, xmm1
-    paddusw xmm0, xmm2
-    psubusw xmm1, xmm0
-    packsswb xmm1, xmm1
-    movq    [r6], xmm1
+    movu      m0, [r1]
+    movu      m1, [r1+16]
+    psubw     m0, m7
+    psubw     m1, m6
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    movu      m2, [r1+r2]
+    movu      m3, [r1+r2+16]
+    psubw     m2, m5
+    psubw     m3, m4
+    paddw     m0, m1
+    ABSW      m2, m2, m1
+    ABSW      m3, m3, m1
+    paddw     m0, m2
+    paddw     m0, m3
+    movu      m2, [r3]
+%if mmsize==32
+    vpbroadcastw m1, r6m
+%else
+    movd      m1, r6m
+    pshuflw   m1, m1, 0
+    punpcklqdq m1, m1
+%endif
+    paddusw   m0, m2
+    psubusw   m1, m0
 %endif ; ARCH
-    ADS_END 2
+    packsswb  m1, m1
+%if mmsize==32
+    vpermq    m1, m1, q3120
+    mova    [r6], xm1
+%else
+    movh    [r6], m1
+%endif
+    ADS_END mmsize/8
 
 cglobal pixel_ads2, 5,7,8
-    movq    xmm6, [r0]
-    movd    xmm5, r6m
-    pshuflw xmm7, xmm6, 0
-    pshuflw xmm6, xmm6, q2222
-    pshuflw xmm5, xmm5, 0
-    punpcklqdq xmm7, xmm7
-    punpcklqdq xmm6, xmm6
-    punpcklqdq xmm5, xmm5
+%if mmsize==32
+    vpbroadcastw m7, [r0+0]
+    vpbroadcastw m6, [r0+4]
+    vpbroadcastw m5, r6m
+%else
+    movq      m6, [r0]
+    movd      m5, r6m
+    pshuflw   m7, m6, 0
+    pshuflw   m6, m6, q2222
+    pshuflw   m5, m5, 0
+    punpcklqdq m7, m7
+    punpcklqdq m6, m6
+    punpcklqdq m5, m5
+%endif
     ADS_START
 .loop:
-    movdqu  xmm0, [r1]
-    movdqu  xmm1, [r1+r2]
-    psubw   xmm0, xmm7
-    psubw   xmm1, xmm6
-    movdqu  xmm4, [r3]
-    ABSW    xmm0, xmm0, xmm2
-    ABSW    xmm1, xmm1, xmm3
-    paddw   xmm0, xmm1
-    paddusw xmm0, xmm4
-    psubusw xmm1, xmm5, xmm0
-    packsswb xmm1, xmm1
-    movq    [r6], xmm1
-    ADS_END 2
+    movu      m0, [r1]
+    movu      m1, [r1+r2]
+    psubw     m0, m7
+    psubw     m1, m6
+    movu      m4, [r3]
+    ABSW      m0, m0, m2
+    ABSW      m1, m1, m3
+    paddw     m0, m1
+    paddusw   m0, m4
+    psubusw   m1, m5, m0
+    packsswb  m1, m1
+%if mmsize==32
+    vpermq    m1, m1, q3120
+    mova    [r6], xm1
+%else
+    movh    [r6], m1
+%endif
+    ADS_END mmsize/8
 
 cglobal pixel_ads1, 5,7,8
-    movd    xmm7, [r0]
-    movd    xmm6, r6m
-    pshuflw xmm7, xmm7, 0
-    pshuflw xmm6, xmm6, 0
-    punpcklqdq xmm7, xmm7
-    punpcklqdq xmm6, xmm6
+%if mmsize==32
+    vpbroadcastw m7, [r0]
+    vpbroadcastw m6, r6m
+%else
+    movd      m7, [r0]
+    movd      m6, r6m
+    pshuflw   m7, m7, 0
+    pshuflw   m6, m6, 0
+    punpcklqdq m7, m7
+    punpcklqdq m6, m6
+%endif
     ADS_START
 .loop:
-    movdqu  xmm0, [r1]
-    movdqu  xmm1, [r1+16]
-    psubw   xmm0, xmm7
-    psubw   xmm1, xmm7
-    movdqu  xmm2, [r3]
-    movdqu  xmm3, [r3+16]
-    ABSW    xmm0, xmm0, xmm4
-    ABSW    xmm1, xmm1, xmm5
-    paddusw xmm0, xmm2
-    paddusw xmm1, xmm3
-    psubusw xmm4, xmm6, xmm0
-    psubusw xmm5, xmm6, xmm1
-    packsswb xmm4, xmm5
-    movdqa  [r6], xmm4
-    ADS_END 4
+    movu      m0, [r1]
+    movu      m1, [r1+mmsize]
+    psubw     m0, m7
+    psubw     m1, m7
+    movu      m2, [r3]
+    movu      m3, [r3+mmsize]
+    ABSW      m0, m0, m4
+    ABSW      m1, m1, m5
+    paddusw   m0, m2
+    paddusw   m1, m3
+    psubusw   m4, m6, m0
+    psubusw   m5, m6, m1
+    packsswb  m4, m5
+%if mmsize==32
+    vpermq    m4, m4, q3120
+%endif
+    mova    [r6], m4
+    ADS_END mmsize/4
 %endmacro
 
 INIT_XMM sse2
@@ -4519,6 +4942,8 @@ ADS_XMM
 INIT_XMM ssse3
 ADS_XMM
 INIT_XMM avx
+ADS_XMM
+INIT_YMM avx2
 ADS_XMM
 
 ; int pixel_ads_mvs( int16_t *mvs, uint8_t *masks, int width )
@@ -4547,8 +4972,6 @@ ADS_XMM
 INIT_MMX
 cglobal pixel_ads_mvs, 0,7,0
 ads_mvs:
-    lea     r6,  [r4+r5+15]
-    and     r6,  ~15;
     ; mvs = r4
     ; masks = r6
     ; width = r5

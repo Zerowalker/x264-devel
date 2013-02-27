@@ -1190,6 +1190,12 @@ void x264_pixel_init( int cpu, x264_pixel_function_t *pixf )
             INIT2( sad_x3, _cache64_ssse3 );
             INIT2( sad_x4, _cache64_ssse3 );
         }
+        else
+        {
+            pixf->sad_x4[PIXEL_8x4] = x264_pixel_sad_x4_8x4_ssse3;
+            pixf->sad_x4[PIXEL_8x8] = x264_pixel_sad_x4_8x8_ssse3;
+            pixf->sad_x4[PIXEL_8x16] = x264_pixel_sad_x4_8x16_ssse3;
+        }
         if( (cpu&X264_CPU_SLOW_ATOM) || (cpu&X264_CPU_SLOW_SHUFFLE) )
         {
             INIT5( ssd, _sse2 ); /* on conroe, sse2 is faster for width8/16 */
@@ -1272,6 +1278,18 @@ void x264_pixel_init( int cpu, x264_pixel_function_t *pixf )
 #if ARCH_X86_64
         pixf->sa8d_satd[PIXEL_16x16] = x264_pixel_sa8d_satd_16x16_xop;
 #endif
+    }
+
+    if( cpu&X264_CPU_AVX2 )
+    {
+        INIT2( ssd, _avx2 );
+        INIT2( sad_x3, _avx2 );
+        INIT2( sad_x4, _avx2 );
+        INIT4( satd, _avx2 );
+        INIT_ADS( _avx2 );
+        pixf->var[PIXEL_16x16] = x264_pixel_var_16x16_avx2;
+        pixf->intra_sad_x3_16x16 = x264_intra_sad_x3_16x16_avx2;
+        pixf->intra_sad_x9_8x8  = x264_intra_sad_x9_8x8_avx2;
     }
 #endif //HAVE_MMX
 

@@ -30,12 +30,12 @@
 %include "x86inc.asm"
 %include "x86util.asm"
 
-SECTION_RODATA
+SECTION_RODATA 32
 
-filt_mul20: times 16 db 20
-filt_mul15: times 8 db 1, -5
-filt_mul51: times 8 db -5, 1
-hpel_shuf: db 0,8,1,9,2,10,3,11,4,12,5,13,6,14,7,15
+filt_mul20: times 32 db 20
+filt_mul15: times 16 db 1, -5
+filt_mul51: times 16 db -5, 1
+hpel_shuf: times 2 db 0,8,1,9,2,10,3,11,4,12,5,13,6,14,7,15
 deinterleave_shuf: db 0,2,4,6,8,10,12,14,1,3,5,7,9,11,13,15
 %if HIGH_BIT_DEPTH
 deinterleave_shuf32a: SHUFFLE_MASK_W 0,2,4,6,8,10,12,14
@@ -357,8 +357,15 @@ cglobal hpel_filter_v, 5,6,%1
     FILT_V2 m1, m2, m3, m4, m5, m6
 %endif
     mova      m7, [pw_16]
+%if mmsize==32
+    mova         [r2+r4*2], xm1
+    mova         [r2+r4*2+mmsize/2], xm4
+    vextracti128 [r2+r4*2+mmsize], m1, 1
+    vextracti128 [r2+r4*2+mmsize*3/2], m4, 1
+%else
     mova      [r2+r4*2], m1
     mova      [r2+r4*2+mmsize], m4
+%endif
     FILT_PACK m1, m4, 5, m7
     movnta    [r0+r4], m1
     add r1, mmsize
@@ -463,20 +470,20 @@ cglobal hpel_filter_c, 3,3,9
     %define tpw_32 [pw_32]
 %endif
 ; This doesn't seem to be faster (with AVX) on Sandy Bridge or Bulldozer...
-%if cpuflag(misalign)
+%if cpuflag(misalign) || mmsize==32
 .loop:
     movu    m4, [src-4]
     movu    m5, [src-2]
-    mova    m6, [src]
-    movu    m3, [src+12]
-    movu    m2, [src+14]
-    mova    m1, [src+16]
+    mova    m6, [src+0]
+    movu    m3, [src-4+mmsize]
+    movu    m2, [src-2+mmsize]
+    mova    m1, [src+0+mmsize]
     paddw   m4, [src+6]
     paddw   m5, [src+4]
     paddw   m6, [src+2]
-    paddw   m3, [src+22]
-    paddw   m2, [src+20]
-    paddw   m1, [src+18]
+    paddw   m3, [src+6+mmsize]
+    paddw   m2, [src+4+mmsize]
+    paddw   m1, [src+2+mmsize]
     FILT_H2 m4, m5, m6, m3, m2, m1
 %else
     mova      m0, [src-16]
@@ -507,8 +514,11 @@ cglobal hpel_filter_c, 3,3,9
     FILT_H    m3, m5, m6
 %endif
     FILT_PACK m4, m3, 6, tpw_32
-    movntps [r0+r2], m4
-    add r2, 16
+%if mmsize==32
+    vpermq    m4, m4, q3120
+%endif
+    movnta [r0+r2], m4
+    add       r2, mmsize
     jl .loop
     RET
 %endmacro
@@ -621,6 +631,45 @@ HPEL_C
 HPEL_V 0
 HPEL_H
 %endif
+INIT_YMM avx2
+HPEL_V 8
+HPEL_C
+
+INIT_YMM avx2
+cglobal hpel_filter_h, 3,3,8
+    add       r0, r2
+    add       r1, r2
+    neg       r2
+    %define src r1+r2
+    mova      m5, [filt_mul15]
+    mova      m6, [filt_mul20]
+    mova      m7, [filt_mul51]
+.loop:
+    movu      m0, [src-2]
+    movu      m1, [src-1]
+    movu      m2, [src+2]
+    pmaddubsw m0, m5
+    pmaddubsw m1, m5
+    pmaddubsw m2, m7
+    paddw     m0, m2
+
+    mova      m2, [src+0]
+    movu      m3, [src+1]
+    movu      m4, [src+3]
+    pmaddubsw m2, m6
+    pmaddubsw m3, m6
+    pmaddubsw m4, m7
+    paddw     m0, m2
+    paddw     m1, m3
+    paddw     m1, m4
+
+    mova      m2, [pw_16]
+    FILT_PACK m0, m1, 5, m2
+    pshufb    m0, [hpel_shuf]
+    movnta [r0+r2], m0
+    add       r2, mmsize
+    jl .loop
+    RET
 
 %if ARCH_X86_64
 %macro DO_FILT_V 5
@@ -1205,25 +1254,35 @@ MEMZERO
 ;-----------------------------------------------------------------------------
 ; void integral_init4h( uint16_t *sum, uint8_t *pix, intptr_t stride )
 ;-----------------------------------------------------------------------------
-INIT_XMM
-cglobal integral_init4h_sse4, 3,4
+%macro INTEGRAL_INIT4H 0
+cglobal integral_init4h, 3,4
     lea     r3, [r0+r2*2]
     add     r1, r2
     neg     r2
     pxor    m4, m4
 .loop:
-    movdqa  m0, [r1+r2]
-    movdqa  m1, [r1+r2+16]
+    mova    m0, [r1+r2]
+%if mmsize==32
+    movu    m1, [r1+r2+8]
+%else
+    mova    m1, [r1+r2+16]
     palignr m1, m0, 8
+%endif
     mpsadbw m0, m4, 0
     mpsadbw m1, m4, 0
     paddw   m0, [r0+r2*2]
-    paddw   m1, [r0+r2*2+16]
-    movdqa  [r3+r2*2   ], m0
-    movdqa  [r3+r2*2+16], m1
-    add     r2, 16
+    paddw   m1, [r0+r2*2+mmsize]
+    mova  [r3+r2*2   ], m0
+    mova  [r3+r2*2+mmsize], m1
+    add     r2, mmsize
     jl .loop
     RET
+%endmacro
+
+INIT_XMM sse4
+INTEGRAL_INIT4H
+INIT_YMM avx2
+INTEGRAL_INIT4H
 
 %macro INTEGRAL_INIT8H 0
 cglobal integral_init8h, 3,4
@@ -1232,20 +1291,26 @@ cglobal integral_init8h, 3,4
     neg     r2
     pxor    m4, m4
 .loop:
-    movdqa  m0, [r1+r2]
-    movdqa  m1, [r1+r2+16]
+    mova    m0, [r1+r2]
+%if mmsize==32
+    movu    m1, [r1+r2+8]
+    mpsadbw m2, m0, m4, 100100b
+    mpsadbw m3, m1, m4, 100100b
+%else
+    mova    m1, [r1+r2+16]
     palignr m1, m0, 8
-    mpsadbw m2, m0, m4, 4
-    mpsadbw m3, m1, m4, 4
+    mpsadbw m2, m0, m4, 100b
+    mpsadbw m3, m1, m4, 100b
+%endif
     mpsadbw m0, m4, 0
     mpsadbw m1, m4, 0
     paddw   m0, [r0+r2*2]
-    paddw   m1, [r0+r2*2+16]
+    paddw   m1, [r0+r2*2+mmsize]
     paddw   m0, m2
     paddw   m1, m3
-    movdqa  [r3+r2*2   ], m0
-    movdqa  [r3+r2*2+16], m1
-    add     r2, 16
+    mova  [r3+r2*2   ], m0
+    mova  [r3+r2*2+mmsize], m1
+    add     r2, mmsize
     jl .loop
     RET
 %endmacro
@@ -1254,6 +1319,8 @@ INIT_XMM sse4
 INTEGRAL_INIT8H
 INIT_XMM avx
 INTEGRAL_INIT8H
+INIT_YMM avx2
+INTEGRAL_INIT8H
 %endif ; !HIGH_BIT_DEPTH
 
 %macro INTEGRAL_INIT_8V 0
@@ -1261,7 +1328,7 @@ INTEGRAL_INIT8H
 ; void integral_init8v( uint16_t *sum8, intptr_t stride )
 ;-----------------------------------------------------------------------------
 cglobal integral_init8v, 3,3
-    shl   r1, 1
+    add   r1, r1
     add   r0, r1
     lea   r2, [r0+r1*8]
     neg   r1
@@ -1281,12 +1348,14 @@ INIT_MMX mmx
 INTEGRAL_INIT_8V
 INIT_XMM sse2
 INTEGRAL_INIT_8V
+INIT_YMM avx2
+INTEGRAL_INIT_8V
 
 ;-----------------------------------------------------------------------------
 ; void integral_init4v( uint16_t *sum8, uint16_t *sum4, intptr_t stride )
 ;-----------------------------------------------------------------------------
-INIT_MMX
-cglobal integral_init4v_mmx, 3,5
+INIT_MMX mmx
+cglobal integral_init4v, 3,5
     shl   r2, 1
     lea   r3, [r0+r2*4]
     lea   r4, [r0+r2*8]
@@ -1307,8 +1376,8 @@ cglobal integral_init4v_mmx, 3,5
     jge .loop
     RET
 
-INIT_XMM
-cglobal integral_init4v_sse2, 3,5
+INIT_XMM sse2
+cglobal integral_init4v, 3,5
     shl     r2, 1
     add     r0, r2
     add     r1, r2
@@ -1333,7 +1402,8 @@ cglobal integral_init4v_sse2, 3,5
     jl .loop
     RET
 
-cglobal integral_init4v_ssse3, 3,5
+INIT_XMM ssse3
+cglobal integral_init4v, 3,5
     shl     r2, 1
     add     r0, r2
     add     r1, r2
@@ -1355,6 +1425,28 @@ cglobal integral_init4v_ssse3, 3,5
     mova  [r0+r2], m1
     mova  [r1+r2], m3
     add     r2, 16
+    jl .loop
+    RET
+
+INIT_YMM avx2
+cglobal integral_init4v, 3,5
+    add     r2, r2
+    add     r0, r2
+    add     r1, r2
+    lea     r3, [r0+r2*4]
+    lea     r4, [r0+r2*8]
+    neg     r2
+.loop:
+    mova    m2, [r0+r2]
+    movu    m1, [r4+r2+8]
+    paddw   m0, m2, [r0+r2+8]
+    paddw   m1, [r4+r2]
+    mova    m3, [r3+r2]
+    psubw   m1, m0
+    psubw   m3, m2
+    mova  [r0+r2], m1
+    mova  [r1+r2], m3
+    add     r2, 32
     jl .loop
     RET
 
