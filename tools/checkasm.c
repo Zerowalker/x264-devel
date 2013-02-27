@@ -310,7 +310,7 @@ static int check_pixel( int cpu_ref, int cpu_new )
 
 #define TEST_PIXEL( name, align ) \
     ok = 1, used_asm = 0; \
-    for( int i = 0; i < 8; i++ ) \
+    for( int i = 0; i < ARRAY_ELEMS(pixel_c.name); i++ ) \
     { \
         int res_c, res_asm; \
         if( pixel_asm.name[i] != pixel_ref.name[i] ) \
